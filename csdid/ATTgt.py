@@ -6,6 +6,12 @@ from pyspark.sql.functions import \
 	lit, col, when, expr, countDistinct,\
 	monotonically_increasing_id, desc
 
+import numpy as np, pandas as pd
+from tqdm import tqdm
+
+
+from drdid import drdid, reg_did
+
 class ATTgt:
   def __init__(
     self, yname, tname, idname, gname, data, control_group = ['nevertreated', 'notyettreated'], 
@@ -30,12 +36,8 @@ class ATTgt:
     self.alp = alp
 
 
+    self._preprocess_did()
 
-    # tlist, glist, n, nG, nT, new_data \
-    #   = self._preprocess_did(
-    #   yname, tname, idname, data, control_group, anticipation, xfmla,
-    #   panel, allow_unbalanced_panel, cband, clustervar, weights_name
-    #   )
 
 
 
@@ -147,6 +149,7 @@ class ATTgt:
     if panel: 
       if allow_unbalanced_panel: 
         panel = False
+        self.panel = panel
         true_rep_cross_section = False
       else:
         keep = data.na.drop('all')
@@ -206,4 +209,246 @@ class ATTgt:
 
     self.tlist, self.glist, self.n, self.nG, self.nT, self.new_data = \
       tlist, glist, n, nG, nT, data
+
+
+  def fit(self, est_method = 'dr', base_period='varying'):
+    self.base_period = base_period
+
+
+    yname = self.yname
+    tname = self.tname
+    idname = self.idname
+    gname = self.gname
+    xfmla = self.xfmla
+    data = self.new_data
+    weights_name = self.weights_name
+    panel = self.panel
+    control_group= self.control_group
+    anticipation = self.anticipation
+
+    n = self.n
+    nT = self.nT
+    nG = self.nG
+
+    tlist = self.tlist.collect()
+    glist = self.glist.collect()
+
+    tlist = [x[tname] for x in tlist]
+    glist = [x[gname] for x in glist]
+    tlist, glist = map(np.array, [tlist, glist])
+    # print(tlist, glist)
+
+    tlist_len, tfac = len(tlist), 0
+
+    if base_period != 'universal':
+      tlist_len = tlist_len - 1
+      tfac = 1
+
+    never_treated = control_group == 'nevertreated'
+    if never_treated:
+      data = data.withColumn('C', when(col(gname) == 0, 1).otherwise(0))
+    
+    data = data.withColumn('y_main', col(yname))
+
+
+    inf_func = []
+
+    att_est, group, year, post_array = [], [], [], []
+
+    def add_att_data(att = 0, pst = 0, inf_f = []):
+      inf_func.append(inf_f)
+      att_est.append(att)
+      group.append(g)
+      year.append(tn)
+      post_array.append(pst)
+
+    covariates_var = xform_to_strings(xfmla)
+
+    # for _, g in tqdm(enumerate(glist)):
+    for g_i in tqdm(range(len(glist))):
+      g = glist[g_i]
+      data = data.withColumn(
+        'G_m', when(
+          col(gname) == g, 1
+        ).otherwise(0)
+      )
+      for t_i in tqdm(range(tlist_len)):
+        # print(g, t_i)
+        pret = t_i
+        tn = tlist[t_i + tfac]
+
+        if base_period == 'universal' or g < tn:
+          try:
+            pret = np.where(tlist + anticipation < g)[0][-1]
+          except:
+            raise f"There are no pre-treatment periods for the group first treated at {g}\nUnits from this group are dropped"
+
+        if base_period == 'universal':
+          if pret == tn:
+            add_att_data()
+          
+        if not never_treated:
+          # base
+          # n1 = data[gname] == 0
+          # n2 = (data[gname] > (tlist[np.max([t_i, pret]) + tfac]) + anticipation)
+          # n3 = np.where(data[gname] != glist[g], True, False)
+          # row_eval = n1 | n2 & n3
+
+          data = data.withColumn('n1', col(gname) == 0)
+          value_n2 = (tlist[np.max([t_i, pret]) + tfac]) + anticipation
+          data = data.withColumn(
+            'n2', col(gname) > value_n2
+          ).withColumn(
+            'n3', col(gname) != g
+          )
+          data = data.withColumn(
+            'row_eval', (col('n1') | col('n2') & col('n3'))
+          ).withColumn('C', col('row_eval'))
+        
+        post_treat = 1 * (g <= tn)
+
+        disdat = data.filter(
+          (col(tname) == tn) | (col(tname) == tlist[pret])
+        )
+
+        if panel:
+          disdat = panel2cs2(data, yname, idname, tname)
+          n = disdat.count()
+          disdat = disdat.withColumns(
+            'dis_idx', (col('G_m') == 1) | (col('C') == 1)
+          )
+          disdat = disdat.filter(col('dis_idx'))
+          n1 = disdat.count()
+
+
+          # .rdd.flatMap(lambda x: x).collect()
+  
+
+          G = disdat.select('G_m').rdd.flatMap(lambda x: x).collect()
+          C = disdat.select('C').rdd.flatMap(lambda x: x).collect()
+          w = disdat.select('_w1').rdd.flatMap(lambda x: x).collect()
+          y0 = disdat.select('y0').rdd.flatMap(lambda x: x).collect()
+          y1 = disdat.select('y1').rdd.flatMap(lambda x: x).collect()
+          dis_idx = disdat.select('dis_idx').rdd.flatMap(lambda x: x).collect()
+
+          ypre = y0 if tn > pret else y1
+          ypost = y0 if tn < pret else y1
+
+          covariates = x_covariates(disdat, covariates_var)
+
+          G, C, w, dis_idx = map(np.array, [G, C, w, dis_idx])
+          ypost, ypre = map(np.array, [ypost, ypre])
+
+
+          if callable(est_method):
+            _f_est_att = est_method
+          elif est_method == 'reg':
+            _f_est_att = reg_did.reg_did_panel
+          elif est_method =='dr':
+            _f_est_att = drdid.drdid_panel
+
+
+          att_gt, att_inf_func = _f_est_att(
+            ypost, ypre, G, i_weights = w, covariates = covariates
+          )
+
+          inf_zeros = np.zeros(n)
+          att_inf = n / n1 * att_inf_func
+          inf_zeros[dis_idx] = att_inf
+
+          add_att_data(att_gt, inf_f=inf_zeros)
+
+        if not panel:
+          disdat = disdat.withColumn(
+              'GmC', (col('G_m') == 1) | (col('C') == 1)
+            ).withColumn(
+              'post', col(tname) == tlist[t_i + tfac]
+            ).withColumn(
+              'tPret', col(tname) == tlist[pret]
+            ).filter(
+              col('GmC') & col('post') | col('tPret')
+            )
+
+          ref_col = [
+            'G_m', 'C', yname, 'post', '_w1', 'rowid'
+          ]
+          var_ = x_covariates(disdat, ref_col)
+
+          G, C, Y, post, w, right_ids = var_[:, :len(ref_col)].T
+          
+          covariates = x_covariates(disdat, covariates_var)
+
+          n1 = sum(G + C)
+
+          skip_this_att_gt_list = np.array([
+            np.sum(G * post) == 0,
+            np.sum(G * (1 - post)) == 0,
+            np.sum(C * post) == 0,
+            np.sum(C * (1 - post)) == 0
+          ])
+
+          skip_this_att_gt = any(skip_this_att_gt_list)
+          if skip_this_att_gt:
+            add_att_data()
+          
+          _t = tlist[t_i]
+          mssg_errors = np.array([
+            f"No units in group {g} in time period {tn}",
+            f"No units in group {g} in time period {_t}",
+            f"No available control units for group {g} in time period {tn}",
+            f"No available control units for group {g} in time period {_t}"
+            ]
+          )
+
+          print_mssg_error = "\n".join(mssg_errors[skip_this_att_gt_list]), 
+          
+          if callable(est_method):
+            _f_est_att = est_method
+          elif est_method == "reg":
+            _f_est_att = reg_did.reg_did_rc
+          elif est_method == "dr":
+            _f_est_att = drdid.drdid_rc
+
+
+          att_gt, att_inf_func = _f_est_att(y=Y, post=post, D = G, i_weights=w, covariates=covariates)
+
+
+          inf_func_df = pd.DataFrame(
+            {
+              "inf_func": att_inf_func,
+              "right_ids": right_ids
+            }
+          )
+          inf_zeros = np.zeros(n)
+          aggte_infffuc = inf_func_df.groupby('right_ids').inf_func.sum()
+
+          data_row_id = data.select('rowid').distinct().rdd.flatMap(lambda x : x).collect()
+          data_row_id = np.array(data_row_id)
+
+          dis_idx1 = np.isin(data_row_id, aggte_infffuc.index.to_numpy())
+
+          inf_zeros[dis_idx1] = np.array(aggte_infffuc)
+
+          add_att_data(att_gt, pst = post_treat, inf_f=inf_zeros)
+          
+
+    output = {
+      'group': group,
+      'time': year,
+      'att': att_est,
+      'post': post_array
+    }
+
+    self.output = output
+    self.inf_func = inf_func
+
+
+    def sum_gt(self, n=4):
+      output = pd.DataFrame(self.output)
+      name_attgt_df = ['Group', 'Time', 'ATT(g, t)', 'Post', "Std. Error", "[95% Pointwise", 'Conf. Band]', '']
+      output.columns = name_attgt_df
+      output = output.round(n)
+      self.summary2_gt = output
+      return self
+
 
