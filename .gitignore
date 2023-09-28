@@ -3,3 +3,4 @@ R/
 # .Rproj
 *checkpoints
 *pycache*
+.Rproj.user

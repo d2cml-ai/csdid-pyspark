@@ -1,4 +1,5 @@
 from .utils import *
+from .mboot import *
 
 
 from pyspark.sql import  SparkSession, Row
@@ -77,7 +78,7 @@ class ATTgt:
       x_cov = data[x_var]
       n_cov = 1
     else:
-      x_var = form_to_strings(fmla=xfmla)
+      x_var = xform_to_strings(fmla=xfmla)
       n_cov = len(x_var)
 
     columns += x_var
@@ -207,13 +208,17 @@ class ATTgt:
     # return tlist, glist, n, nG, nT, data
 
 
+    tlist = tlist.collect()
+    glist = glist.collect()
     self.tlist, self.glist, self.n, self.nG, self.nT, self.new_data = \
       tlist, glist, n, nG, nT, data
 
+    self.true_rep_cross_section = true_rep_cross_section
 
-  def fit(self, est_method = 'dr', base_period='varying'):
+
+  def fit(self, est_method = 'dr', base_period='varying', bstrap=False):
     self.base_period = base_period
-
+    self.bstrap = bstrap
 
     yname = self.yname
     tname = self.tname
@@ -225,13 +230,14 @@ class ATTgt:
     panel = self.panel
     control_group= self.control_group
     anticipation = self.anticipation
+    tlist = self.tlist
+    glist = self.glist
 
     n = self.n
     nT = self.nT
     nG = self.nG
 
-    tlist = self.tlist.collect()
-    glist = self.glist.collect()
+
 
     tlist = [x[tname] for x in tlist]
     glist = [x[gname] for x in glist]
@@ -432,23 +438,48 @@ class ATTgt:
           add_att_data(att_gt, pst = post_treat, inf_f=inf_zeros)
           
 
+    l_attest = len(att_est)
+    crit_val, se, v = np.zeros(l_attest), np.zeros(l_attest), np.zeros(l_attest)
+
+    if bstrap:
+      inf_func = np.array(inf_func)
+      ref_se = mboot(
+        inf_func.T, data, idname, self.clustervar, self.biters, self.tname, 
+        self.tlist, self.alp, self.panel, 
+        )
+      crit_val, se = ref_se['crit_val'], ref_se['se']
+
+
+    cband_lower = att_est - crit_val * se
+    cband_upper = att_est + crit_val * se
+    sig = (cband_upper < 0) | (cband_lower > 0)
+
+    sig[np.isnan(sig)] = False
+    sig_text = np.where(sig, "*", "")
+
     output = {
       'group': group,
       'time': year,
       'att': att_est,
-      'post': post_array
+      'post': post_array,
+      'se': se,
+      'upper': cband_lower,
+      'lower': cband_upper,
+      'sig': sig_text 
     }
 
     self.output = output
     self.inf_func = inf_func
 
 
-    def sum_gt(self, n=4):
-      output = pd.DataFrame(self.output)
-      name_attgt_df = ['Group', 'Time', 'ATT(g, t)', 'Post', "Std. Error", "[95% Pointwise", 'Conf. Band]', '']
-      output.columns = name_attgt_df
-      output = output.round(n)
-      self.summary2_gt = output
-      return self
+  def sum_gt(self, n=4):
+    output = pd.DataFrame(self.output)
+    name_attgt_df = ['Group', 'Time', 'ATT(g, t)', 'Post', "Std. Error", "[95% Pointwise", 'Conf. Band]', '']
+    output.columns = name_attgt_df
+    output = output.round(n)
+    if not self.bstrap:
+      output = output[name_attgt_df[:4]]
+    self.summary2_gt = output
+    return self
 
 

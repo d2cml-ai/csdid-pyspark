@@ -7,6 +7,12 @@ name = "pypi"
 pyspark = "*"
 ipykernel = "*"
 findspark = "*"
+numpy = "*"
+tqdm = "*"
+drdid = {git = "https://github.com/d2cml-ai/DRDID"}
+pandas = "*"
+scipy = "*"
+joblib = "*"
 
 [dev-packages]
 ipykernel = "*"
