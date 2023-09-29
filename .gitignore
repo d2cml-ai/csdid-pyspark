@@ -2,3 +2,6 @@ R/
 *Rproj*
 # .Rproj
 *checkpoints
+*pycache*
+.Rproj.user
+*data

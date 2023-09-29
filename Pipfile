@@ -1,0 +1,22 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+pyspark = "*"
+ipykernel = "*"
+findspark = "*"
+numpy = "*"
+tqdm = "*"
+drdid = {git = "https://github.com/d2cml-ai/DRDID"}
+pandas = "*"
+scipy = "*"
+joblib = "*"
+matplotlib = "*"
+
+[dev-packages]
+ipykernel = "*"
+
+[requires]
+python_version = "3.8"
