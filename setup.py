@@ -26,7 +26,7 @@ setup(
 	'joblib',
 	'findspark',
 	'matplotlib',
-	'numpy',
+	'numpy<=1.24',
 	'pandas',
 	'tqdm',
 	'scipy'
