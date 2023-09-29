@@ -3,9 +3,9 @@ from setuptools import setup, find_packages
 # with open('requirements.txt') as f:
 #     required = f.read().splitlines()
 # print(required)
-from .csdids.version import version
-print(version)
-
+# from .csdids.version import version
+# print(version)
+version='0.1'
 setup(
   name = 'csdidspark',
   version=version,
