@@ -1,5 +1,6 @@
 from .utils import *
 from .mboot import *
+from .utils_aggte import *
 
 
 from pyspark.sql import  SparkSession, Row
@@ -38,6 +39,13 @@ class ATTgt:
 
 
     self._preprocess_did()
+    summary_aggte = {
+      'group': None,
+      'calendar': None,
+      'simple': None
+    }
+
+    self.summary_aggte = summary_aggte
 
 
 
@@ -455,6 +463,9 @@ class ATTgt:
     DIDparams['tname'] = tname
     DIDparams['idname'] = idname
     DIDparams['cband'] = self.cband
+    DIDparams['control_group'] = self.control_group
+    DIDparams['anticipation'] = self.anticipation
+    DIDparams['est_method'] = est_method
     
 
     if bstrap:
@@ -485,6 +496,7 @@ class ATTgt:
 
     self.output = output
     self.inf_func = inf_func
+    self.DIDparams = DIDparams
 
 
   def sum_gt(self, n=4):
@@ -506,7 +518,9 @@ class ATTgt:
                       biters        = None,
                       cband         = None,
                       alp           = None,
-                      clustervars   = None):
+                      clustervars   = None,
+                      print_ = True
+                      ):
     out_result = self.output
     group = out_result['group']
     t = out_result['time']
@@ -537,6 +551,9 @@ class ATTgt:
 
     if typec not in ["simple", "dynamic", "group", "calendar"]:
         raise "`typec` must be one of ['simple', 'dynamic', 'group', 'calendar']"
+
+
+
     
     if na_rm:
         notna = ~np.isnan(att)
@@ -620,6 +637,238 @@ class ATTgt:
     
     # n x 1 vector of group variable
     G = [orig2t(g) for g in _gvals]
+    # print(G)
+    dp = self.DIDparams
+
+    if typec == "simple":
+      # Simple ATT
+      # Averages all post-treatment ATT(g,t) with weights given by group size
+      pg = np.array(pg)
+      simple_att = np.sum(att[keepers] * pg[keepers]) / np.sum(pg[keepers])
+      if np.isnan(simple_att):
+          simple_att = None
+  
+      # Get the part of the influence function coming from estimated weights
+      simple_wif = wif(keepers, pg, weights_ind, G, group)
+  
+      # Get the overall influence function
+      simple_if = get_agg_inf_func(att = att , 
+                                    inffunc = inffunc , 
+                                    whichones = keepers ,
+                                    weights_agg = np.array(pg)[keepers]/np.sum(np.array(pg)[keepers]) , 
+                                    wif = simple_wif )[:, None]
+  
+      # Get standard errors from the overall influence function
+      simple_se = get_se(simple_if, dp)
+      
+      if simple_se is not None:
+          if simple_se <= np.sqrt(np.finfo(float).eps) * 10:
+              simple_se = None
+
+      simple_aggte = AGGTEobj(overall_att=simple_att, 
+                                  overall_se=simple_se, 
+                                  typec=typec,
+                                  inf_function={'simple_att': simple_if}, 
+                                  DIDparams=dp, print_=print_)
+
+      self.summary_aggte['simple'] = simple_aggte
+      # print(AGGTEobj_print)
 
 
+
+    # =============================================================================
+#  GRoup
+# =============================================================================
+
+    if typec == "group":
+        group = np.array(group)
+        t = np.array(t) 
+        pg = np.array(pg) 
+        selective_att_g = [np.mean(att[( group== g) & (t >= g) & (t <= (group + max_e))]) for g in glist]
+        selective_att_g = np.asarray(selective_att_g)
+        selective_att_g[np.isnan(selective_att_g)] = None
+    
+        selective_se_inner = [None] * len(glist)
+        for i, g in enumerate(glist):
+            whichg = np.where(np.logical_and.reduce((group == g, g <= t, t <= (group + max_e))))[0]
+            weightsg =  pg[whichg] / np.sum(pg[whichg])
+            inf_func_g = get_agg_inf_func(att = att , 
+                                            inffunc = inffunc , 
+                                            whichones = whichg ,
+                                            weights_agg = weightsg , 
+                                            wif = None)[:, None]
+            se_g = get_se(inf_func_g, dp)
+            selective_se_inner[i] = {'inf_func': inf_func_g, 'se': se_g}
+            
+        # recover standard errors separately by group   
+        selective_se_g = np.asarray([item['se'] for item in selective_se_inner]).T
+        
+        selective_se_g[selective_se_g <= np.sqrt(np.finfo(float).eps) * 10] = None
+        
+        selective_inf_func_g = np.column_stack([elem["inf_func"] for elem in selective_se_inner])
+  
+        # use multiplier bootstrap (across groups) to get critical value
+        # for constructing uniform confidence bands   
+        selective_crit_val = norm.ppf(1 - alp/2)
+        
+        if dp['cband']:
+            if not dp['bstrap']:
+                print("Used bootstrap procedure to compute simultaneous confidence band")
+        
+            selective_crit_val = mboot(selective_inf_func_g, dp)['crit_val']
+        
+            if np.isnan(selective_crit_val) or np.isinf(selective_crit_val):
+                print("Simultaneous critical value is NA. This probably happened because we cannot compute t-statistic (std errors are NA). We then report pointwise conf. intervals.")
+                selective_crit_val = norm.ppf(1 - alp/2)
+                dp['cband'] = False
+        
+            if selective_crit_val < norm.ppf(1 - alp/2):
+                print("Simultaneous conf. band is somehow smaller than pointwise one using normal approximation. Since this is unusual, we are reporting pointwise confidence intervals")
+                selective_crit_val = norm.ppf(1 - alp/2)
+                dp['cband'] = False
+        
+            if selective_crit_val >= 7:
+                print("Simultaneous critical value is arguably 'too large' to be reliable. This usually happens when the number of observations per group is small and/or there is not much variation in outcomes.")
+  
+        # get overall att under selective treatment timing
+        # (here use pgg instead of pg because we can just look at each group)            
+        selective_att = np.sum(selective_att_g * pgg) / np.sum(pgg)
+        
+        # account for having to estimate pgg in the influence function    
+        selective_wif = wif(keepers = np.arange(1, len(glist)+1)-1, 
+                            pg  = pgg, 
+                            weights_ind = weights_ind, 
+                            G = G, 
+                            group = group)
+        
+        # get overall influence function   
+        selective_inf_func = get_agg_inf_func(att = selective_att_g, 
+                                              inffunc = selective_inf_func_g,
+                                              whichones = np.arange(1, len(glist)+1)-1, 
+                                              weights_agg = pgg/np.sum(pgg),
+                                              wif = selective_wif)[:, None]    
+        
+        # get overall standard error        
+        selective_se = get_se(selective_inf_func, dp)
+        if not np.isnan(selective_se):
+            if selective_se <= np.sqrt(np.finfo(float).eps) * 10:
+                selective_se = None
+    
+        group_aggte = AGGTEobj(overall_att = selective_att, 
+                            overall_se = selective_se, 
+                            typec = typec,
+                            egt = originalglist,
+                            att_egt = selective_att_g,
+                            se_egt = selective_se_g,
+                            crit_val_egt = selective_crit_val,
+                            inf_function = {'selective_inf_func_g': selective_inf_func_g, 
+                                            'selective_inf_func': selective_inf_func},
+                            DIDparams = dp, print_=print_)
+
+        self.summary_aggte['group'] = group_aggte
+
+        # =============================================================================
+#  Calendar
+# =============================================================================
+
+ # np.array(group)
+    if typec == "calendar":
+        minG = min(group)
+        calendar_tlist = tlist[tlist >= minG]
+        pg = np.array(pg)
+        calendar_att_t = []
+        group = np.array(group)
+        t = np.array(t)
+        for t1 in calendar_tlist:
+            whicht = np.where((t == t1) & (group <= t))[0]
+            attt = att[whicht]
+            pgt = pg[whicht] / np.sum(pg[whicht])
+            calendar_att_t.append(np.sum(pgt * attt))
+            
+        # get standard errors and influence functions
+        # for each time specific att
+        calendar_se_inner = []
+        for t1 in calendar_tlist:
+            which_t = np.where((t == t1) & (group <= t))[0]
+            pgt = pg[which_t] / np.sum(pg[which_t])
+            wif_t = wif(keepers=which_t, 
+                        pg=pg, 
+                        weights_ind=weights_ind, 
+                        G=G, 
+                        group=group)
+            inf_func_t = get_agg_inf_func(att=att, 
+                                            inffunc=inffunc, 
+                                            whichones=which_t, 
+                                            weights_agg=pgt, 
+                                            wif=wif_t)[:, None]
+            se_t = get_se(inf_func_t, dp)
+            calendar_se_inner.append({"inf_func": inf_func_t, "se": se_t})
+    
+    
+    
+        # recover standard errors separately by time
+        calendar_se_t = np.array([se["se"] for se in calendar_se_inner]).T
+        calendar_se_t[calendar_se_t <= np.sqrt(np.finfo(float).eps) * 10] = np.nan
+        
+        # recover influence function separately by time
+        calendar_inf_func_t = np.column_stack([se["inf_func"] for se in calendar_se_inner])
+    
+        # use multiplier boostrap (across groups) to get critical value
+        # for constructing uniform confidence bands
+        calendar_crit_val = norm.ppf(1 - alp/2)
+        
+        if dp['cband']:
+            if not dp['bstrap']:
+                warnings.warn('Used bootstrap procedure to compute simultaneous confidence band')
+        
+            # mboot function is not provided, please define it separately
+            calendar_crit_val = mboot(calendar_inf_func_t, dp)['crit_val']
+        
+            if np.isnan(calendar_crit_val) or np.isinf(calendar_crit_val):
+                warnings.warn('Simultaneous critical value is NA. This probably happened because we cannot compute t-statistic (std errors are NA). We then report pointwise conf. intervals.')
+                calendar_crit_val = norm.ppf(1 - alp/2)
+                dp['cband'] = False
+        
+            if calendar_crit_val < norm.ppf(1 - alp/2):
+                warnings.warn('Simultaneous conf. band is somehow smaller than pointwise one using normal approximation. Since this is unusual, we are reporting pointwise confidence intervals.')
+                calendar_crit_val = norm.ppf(1 - alp/2)
+                dp['cband'] = False
+        
+            if calendar_crit_val >= 7:
+                warnings.warn("Simultaneous critical value is arguably 'too large' to be reliable. This usually happens when the number of observations per group is small and/or there is not much variation in outcomes.")
+    
+    
+        # get overall att under calendar time effects
+        # this is just average over all time periods
+        calendar_att = np.mean(calendar_att_t)
+        
+        # get overall influence function
+        calendar_inf_func = get_agg_inf_func(att=calendar_att_t,
+                                             inffunc=calendar_inf_func_t,
+                                             whichones=range(len(calendar_tlist)),
+                                             weights_agg=np.repeat(1/len(calendar_tlist), len(calendar_tlist)),
+                                             wif=None)[:, None]
+        calendar_inf_func = np.array(calendar_inf_func)
+        
+        # get overall standard error
+        calendar_se = get_se(calendar_inf_func, dp)
+        if not np.isnan(calendar_se):
+            if calendar_se <= np.sqrt(np.finfo(float).eps) * 10:
+                calendar_se = np.nan
+        
+        calendar_aggte = AGGTEobj(overall_att=calendar_att,
+                                overall_se=calendar_se,
+                                typec=typec,
+                                egt=list(map(t2orig, calendar_tlist)),
+                                att_egt=calendar_att_t,
+                                se_egt=calendar_se_t,
+                                crit_val_egt=calendar_crit_val,
+                                inf_function={"calendar_inf_func_t": calendar_inf_func_t,
+                                              "calendar_inf_func": calendar_inf_func},
+  
+                                DIDparams=dp)
+
+        self.summary_aggte['calendar'] = calendar_aggte
+
+  
 
