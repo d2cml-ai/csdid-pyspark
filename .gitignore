@@ -4,3 +4,4 @@ R/
 *checkpoints
 *pycache*
 .Rproj.user
+*data

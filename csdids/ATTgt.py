@@ -505,7 +505,9 @@ class ATTgt:
 
 
   def sum_gt(self, n=4):
-    output = pd.DataFrame(self.output)
+    out = self.output.copy()
+    del out['c']
+    output = pd.DataFrame(out)
     name_attgt_df = ['Group', 'Time', 'ATT(g, t)', 'Post', "Std. Error", "[95% Pointwise", 'Conf. Band]', '']
     output.columns = name_attgt_df
     output = output.round(n)
