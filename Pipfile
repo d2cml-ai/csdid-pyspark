@@ -13,6 +13,7 @@ drdid = {git = "https://github.com/d2cml-ai/DRDID"}
 pandas = "*"
 scipy = "*"
 joblib = "*"
+matplotlib = "*"
 
 [dev-packages]
 ipykernel = "*"
