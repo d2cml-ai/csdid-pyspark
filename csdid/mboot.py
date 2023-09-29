@@ -60,17 +60,21 @@ def run_multiplier_bootstrap(inf_func, biters, pl=False, cores=1):
 
     return results
 
-def mboot(
-	inf_func, 
-	data, idname, clustervar, biters, tname, tlist,
-	alp, panel, 
-	pl=False, cores=1
-	):
-
+def mboot(inf_func, DIDparams, pl=False, cores=1):
+    # Setup needed variables
+    data            = DIDparams['data'] 
+    idname          = DIDparams['idname']
+    clustervars     = DIDparams['clustervar']
+    biters          = DIDparams['biters']
+    tname           = DIDparams['tname']
+    tlist = DIDparams['tlist']
+    alp             = DIDparams['alp']
+    panel           = DIDparams['panel']
 
     # Get n observations (for clustering below)
     if panel:
-        data = data[data[tname] == tlist[0] ]
+        data = data.filter(col(tname) == tlist[0])
+
 
     # Convert inf_func to matrix
     inf_func = np.asarray(inf_func)
@@ -78,34 +82,34 @@ def mboot(
     # Set correct number of units
     n = inf_func.shape[0]
 
-    # Drop idname if it is in clustervar
-    if clustervar is not None and idname in clustervar:
-        clustervar.remove(idname)
+    # Drop idname if it is in clustervars
+    if clustervars is not None and idname in clustervars:
+        clustervars.remove(idname)
 
-    if clustervar is not None:
-        if isinstance(clustervar, list) and isinstance(clustervar[0], str):
-            raise ValueError("clustervar need to be the name of the clustering variable.")
+    if clustervars is not None:
+        if isinstance(clustervars, list) and isinstance(clustervars[0], str):
+            raise ValueError("clustervars need to be the name of the clustering variable.")
 
     # We can only handle up to 2-way clustering
-    if clustervar is not None and len(clustervar) > 1:
+    if clustervars is not None and len(clustervars) > 1:
         raise ValueError("Can't handle that many cluster variables")
 
-    if clustervar is not None:
+    if clustervars is not None:
         # Check that cluster variable does not vary over time within unit
-        clust_tv = data.groupby(idname)[clustervar[0]].nunique() == 1
+        clust_tv = data.groupby(idname)[clustervars[0]].nunique() == 1
         if not clust_tv.all():
             raise ValueError("Can't handle time-varying cluster variables")
-    # clustervar='year'    
+    # clustervars='year'    
     # Multiplier bootstrap
     n_clusters = n
-    if not clustervar:
+    if not clustervars:
         bres = np.sqrt(n) * run_multiplier_bootstrap(inf_func, biters, pl, cores)
-    # else:
-    #     n_clusters = data[clustervar].distinct().count()
-    #     cluster = data.select([idname, clustervar]).distinct().values[:, 1]
-    #     cluster_n = data.groupby(cluster).size().values
-    #     cluster_mean_if = pd.DataFrame(inf_func).groupby(cluster).sum().values / cluster_n
-    #     bres = np.sqrt(n_clusters) * run_multiplier_bootstrap(cluster_mean_if, biters, pl, cores)
+    else:
+        n_clusters = len(data[clustervars].drop_duplicates())
+        cluster = data[[idname, clustervars]].drop_duplicates().values[:, 1]
+        cluster_n = data.groupby(cluster).size().values
+        cluster_mean_if = pd.DataFrame(inf_func).groupby(cluster).sum().values / cluster_n
+        bres = np.sqrt(n_clusters) * run_multiplier_bootstrap(cluster_mean_if, biters, pl, cores)
 
     # Handle vector and matrix case differently to get nxk matrix
     if isinstance(bres, np.ndarray) and bres.ndim == 1:

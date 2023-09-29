@@ -5,7 +5,7 @@ from .mboot import *
 from pyspark.sql import  SparkSession, Row
 from pyspark.sql.functions import \
 	lit, col, when, expr, countDistinct,\
-	monotonically_increasing_id, desc
+	monotonically_increasing_id, desc, mean
 
 import numpy as np, pandas as pd
 from tqdm import tqdm
@@ -210,6 +210,8 @@ class ATTgt:
 
     tlist = tlist.collect()
     glist = glist.collect()
+    tlist = [x[tname] for x in tlist]
+    glist = [x[gname] for x in glist]
     self.tlist, self.glist, self.n, self.nG, self.nT, self.new_data = \
       tlist, glist, n, nG, nT, data
 
@@ -239,8 +241,7 @@ class ATTgt:
 
 
 
-    tlist = [x[tname] for x in tlist]
-    glist = [x[gname] for x in glist]
+
     tlist, glist = map(np.array, [tlist, glist])
     # print(tlist, glist)
 
@@ -441,11 +442,25 @@ class ATTgt:
     l_attest = len(att_est)
     crit_val, se, v = np.zeros(l_attest), np.zeros(l_attest), np.zeros(l_attest)
 
+    DIDparams = {}
+    DIDparams['bstrap'] = bstrap
+    DIDparams['alp'] = self.alp
+    DIDparams['panel'] = self.panel
+    DIDparams['data'] = self.new_data
+    DIDparams['clustervar'] = self.clustervar
+    DIDparams['biters'] = self.biters
+    DIDparams['tname'] = self.tname
+    DIDparams['true_repeated_cross_section'] = self.true_rep_cross_section
+    DIDparams['tlist'] = tlist
+    DIDparams['tname'] = tname
+    DIDparams['idname'] = idname
+    DIDparams['cband'] = self.cband
+    
+
     if bstrap:
       inf_func = np.array(inf_func)
       ref_se = mboot(
-        inf_func.T, data, idname, self.clustervar, self.biters, self.tname, 
-        self.tlist, self.alp, self.panel, 
+        inf_func.T, DIDparams
         )
       crit_val, se = ref_se['crit_val'], ref_se['se']
 
@@ -481,5 +496,130 @@ class ATTgt:
       output = output[name_attgt_df[:4]]
     self.summary2_gt = output
     return self
+
+  def compute_aggte(self, typec         = "group",
+                      balance_e     = None,
+                      min_e         = float('-inf'),
+                      max_e         = float('inf'),
+                      na_rm         = False,
+                      bstrap        = None,
+                      biters        = None,
+                      cband         = None,
+                      alp           = None,
+                      clustervars   = None):
+    out_result = self.output
+    group = out_result['group']
+    t = out_result['time']
+    att = out_result['att']
+    tlist = self.tlist
+    glist = self.glist
+    data = self.new_data
+    inffunc = np.array(self.inf_func).T
+    n = self.n
+    gname = self.gname
+    tname = self.tname
+    idname = self.idname
+    panel = self.panel
+
+    group, t, att, tlist, glist = \
+      map(np.array, [group, t, att, tlist, glist])
+
+    if clustervars is None:
+        clustervars = self.clustervar
+    if bstrap is None:
+        bstrap = self.bstrap
+    if biters is None:
+        biters = self.biters
+    if alp is None:
+        alp = self.alp
+    if cband is None:
+        cband = self.cband
+
+    if typec not in ["simple", "dynamic", "group", "calendar"]:
+        raise "`typec` must be one of ['simple', 'dynamic', 'group', 'calendar']"
+    
+    if na_rm:
+        notna = ~np.isnan(att)
+        group = group[notna]
+        t = t[notna]
+        att = att[notna]
+        inffunc = inffunc[:, notna]
+        glist = np.sort(np.unique(group))
+    
+        if typec == "group":
+            gnotna = []
+            for g in glist:
+                indices = np.where((group == g) & (g <= t))
+                is_not_na = np.any(~np.isnan(att[indices]))
+                gnotna.append(is_not_na)
+            
+            gnotna = np.array(gnotna)
+            glist = glist[gnotna]
+            not_all_na = np.isin(group, glist)
+            group = group[not_all_na]
+            t = t[not_all_na]
+            att = att[not_all_na]
+            inffunc = inffunc[:, not_all_na]
+            glist = np.sort(np.unique(group))
+
+    if (not na_rm) and np.any(np.isnan(att)):
+        raise "Missing values at att_gt found. If you want to remove these, set `na_rm = True`."
+    if panel:
+      dta = data.filter(col(tname) == tlist[0])
+      columns_r = ['_w1', gname]
+    else:
+      dta = data.groupBy(idname).agg(
+        mean(col('_w1')),
+        mean(col(gname))
+      )
+      columns_r = dta.columns[1:]
+
+    var_cols = x_covariates(dta, columns_r)
+    _w1, _gvals = var_cols[:, :2].T
+
+    originalt = t
+    originalgroup = group.copy()
+    originalglist = glist.copy()
+    originaltlist = tlist.copy()
+    # In case g's are not part of tlist
+
+
+    list_array = list(originaltlist) + list(originalglist)
+    originalgtlist = np.sort(np.unique(list_array))
+    uniquet = list(range(len(originalgtlist) ))
+
+    def t2orig(t):
+        return originalgtlist[uniquet.index(t) if t in uniquet else -1]
+    
+    # Function to switch between "original" t values and new t values
+    def orig2t(orig):
+        new_t = [uniquet[i] for i in range(len(originalgtlist)) if originalgtlist[i] == orig]
+        out = new_t[0] if new_t else None
+        return out
+    
+    # print(originalgtlist, uniquet)
+    t     = [orig2t(orig) for orig in originalt]
+    group = [orig2t(orig) for orig in originalgroup]
+    glist = [orig2t(orig) for orig in originalglist]
+    tlist = np.asarray(list(set(t)))
+    maxT  = max(t)
+        
+    # Set the weights
+    # return data.columns
+    weights_ind = _w1
+    
+    # We can work in overall probabilities because conditioning will cancel out
+    # since it shows up in numerator and denominator
+    pg = np.array([np.mean(weights_ind * (_gvals == g)) for g in originalglist])
+    pgg = pg.copy()
+
+    pg = [pg[glist.index(g)] for g in group]  
+    
+    # Which group time average treatment effects are post-treatment
+    keepers = [i for i in range(len(group)) if group[i] <= t[i] <= (group[i] + max_e)] ### added second condition to allow for limit on longest period included in att
+    
+    # n x 1 vector of group variable
+    G = [orig2t(g) for g in _gvals]
+
 
 
