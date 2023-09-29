@@ -3,12 +3,12 @@ from setuptools import setup, find_packages
 # with open('requirements.txt') as f:
 #     required = f.read().splitlines()
 # print(required)
-from csdids._version import __version
-print(__version)
+from .csdids.version import version
+print(version)
 
 setup(
   name = 'csdidspark',
-  version=__version,
+  version=version,
   url='https://github.com/d2cml-ai/csdid-pyspark',
   author='D2CML Team, Alexander Quispe, Carlos Guevara, Jhon Flores',
   keywords=['Causal inference', 'Research'],
@@ -31,7 +31,7 @@ setup(
 	'tqdm',
 	'scipy'
   ],
-  packages=find_packages(),
+  packages=find_packages()
 #   package_data={
     # 'data': ['data/*'],
     # 'configs': ['configs/*']
